@@ -1,0 +1,222 @@
+---
+title: "Habitat alteration or climate: What drives the densities of an invading ungulate?"
+author: "Melanie Dickie"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r render, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+rmarkdown::render('README.Rmd',
+                  output_file = "README.md")
+```
+
+In this repository you will find the data and scripts used for Dickie et al.,2024. Habitat alteration or climate: What drives the densities of an invading ungulate?, Global Change Biology.
+
+# Analysis Details:
+We used a two-stage modelling framework to first identify metrics to best represent the two main variables of interest (habitat alteration and climate), and then to evaluate their relative effects on average  deer density while controlling for habitat productivity. 
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+##Load packages and data:
+require(ggplot2)
+require(viridis)
+require(dplyr)
+require(glmmTMB)
+require(MuMIn)
+require(DHARMa)
+library(sf)
+library(dplyr)
+
+Attributes<-read.csv(here::here("Data", "All_Attributes_October_2023.csv"))
+mydata<-read.csv(here::here("Data", "WTDDensities.csv"))
+```
+
+
+```{r, warning=FALSE}
+##Join attributes into camera data:
+mydata$Year[mydata$monitoring_period  == "monitor_2021"] <-2021
+mydata$Year[mydata$monitoring_period  == "monitor_2020"] <-2020
+mydata$Year[mydata$monitoring_period  == "monitor_2019"] <-2019
+mydata$Year[mydata$monitoring_period  == "monitor_2018"] <-2018
+mydata$Year[mydata$monitoring_period  == "monitor_2017"] <-2017
+mydata$Year<-as.factor(mydata$Year)
+mydata$GridYear<-paste(mydata$grid,mydata$Year,sep="")
+
+mydata$Density<-mydata$density_avg
+mydata$LCI<-mydata$density_lci_0.9
+mydata$UCI<-mydata$density_uci_0.9
+
+mydata<-mydata%>%
+  left_join(Attributes, by="GridYear", suffix=c("",".y"))%>%
+  select(-ends_with(".y"))
+
+#rescale all variables from 0 to 1 
+scale_values <- function(x){(x-min(x))/(max(x)-min(x))}
+mydata$ScaledDirAlt<-scale_values(mydata$Dist)
+mydata$ScaledPCADim1<-scale_values(mydata$PCADim1)
+mydata$ScaledPCADim2<-scale_values(mydata$PCADim2)
+mydata$ScaledMFADim1No2016<-scale_values(mydata$MFADim1No2016)
+mydata$ScaledMFADim2No2016<-scale_values(mydata$MFADim2No2016)
+mydata$ScaledEvi<-scale_values(mydata$EVI)
+mydata$ScaledBufAlt<-scale_values(mydata$AnthroDistPerc)
+mydata$ScaledNDep<-scale_values(mydata$n_deployments)
+
+mydata$Year<-as.factor(mydata$Year)
+```
+```{r echo=FALSE, warning=FALSE}
+##Density as a function of disturbance, coloured by deltaEVI to look at the interaction
+ggplot(data = mydata, aes(x = Dist, y = Density, color = (EVI), shape=as.factor(Year))) +
+  geom_point(size = 3, position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("% Alteration") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  + 
+  ylim(0,8)+
+  labs(color = expression(""*Delta*"EVI"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+```{r echo=FALSE, warning=FALSE}
+##Density as a function of weather, coloured by deltaEVI to look at the interaction
+ggplot(data = mydata, aes(x = PCADim1, y = Density, color = (EVI), shape=as.factor(Year))) +
+  geom_point(size = 3, position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("Weather Dimension 1") +
+  ylab(expression(paste("Density (animals /", km^2, ")")))+  theme_bw()  + 
+  labs(color = expression(""*Delta*"EVI"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+```{r echo=FALSE, warning=FALSE}
+##Density as a function of climate, coloured by deltaEVI to look at the interaction
+ggplot(data = mydata, aes(x = MFADim1No2016, y = Density, color = (EVI), shape=as.factor(Year))) +
+  geom_point(size = 3, position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("Climate Dimension 1") +
+  ylab(expression(paste("Density (animals /", km^2, ")")))+  theme_bw()  + 
+  labs(color = expression(""*Delta*"EVI"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+```{r echo=FALSE, warning=FALSE}
+##Density as a functin of climate, coloured by disturbance to look at the interaction
+ggplot(data = mydata, aes(x = MFADim1No2016, y = Density, color = (Dist), shape=as.factor(Year))) +
+  geom_point(size = 3, position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("Climate Dimension 1") +
+  ylab(expression(paste("Density (animals /", km^2, ")")))+  theme_bw()  + 
+  labs(color = ("% Alteration"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+```{r echo=FALSE, warning=FALSE}
+##Density as a functin of Disturbance, coloured by weather to look at the interaction
+ggplot(data = mydata, aes(x = Dist, y = Density, color = (PCADim1), shape=as.factor(Year))) +
+  geom_point(size = 3, position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("% Alteration") +
+  ylab(expression(paste("Density (animals /", km^2, ")")))+  theme_bw()  + 
+  labs(color = ("Weather D1"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+
+## Correlation between independent variables of interest:
+```{r, warning=FALSE}
+#Relationship between disturbance and EVI:
+cor(mydata$Dist,mydata$EVI)
+```
+
+```{r, warning=FALSE}
+##Disturbance and weather dimension 1:
+cor(mydata$Dist,mydata$PCADim1)
+```
+
+```{r, warning=FALSE}
+##Disturbance and climate dimension 1:
+cor(mydata$Dist,mydata$MFADim1No2016)
+```
+
+
+## Model comparisons to choose variables for subsequent analyses:
+
+Because cameras can fail to operate during some monitoring periods, we include the number of cameras operating in a given cluster year combination as a model weight (to increase the weight of density estimates that use more cameras). We also included an ar1 covariance structure to account for temporal correlation. We specify a tweedie distribution for all analyses. 
+
+```{r, warning=FALSE}
+## Direct habitat alteration vs buffered habitat alteration
+MS_DirAlt<-glmmTMB(Density~ScaledDirAlt + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_BufAlt<-glmmTMB(Density~ScaledBufAlt + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+AICc(MS_DirAlt, MS_BufAlt)
+```
+Direct alteration (MS_DirAlt) is most supported metric of habitat alteration.
+
+```{r, warning=FALSE}
+## Weather Dimension 1 vs 2 vs both vs climate Dimension 1 vs 2 vs both
+MS_PCADim1<-glmmTMB(Density~ScaledPCADim1 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_PCADim2<-glmmTMB(Density~ScaledPCADim2 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_PCADims<-glmmTMB(Density~ScaledPCADim1+ScaledPCADim2 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_MFADim1No2016<-glmmTMB(Density~ScaledMFADim1No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_MFADim2No2016<-glmmTMB(Density~ScaledMFADim2No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_MFADims<-glmmTMB(Density~ScaledMFADim1No2016+ScaledMFADim2No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+AICc(MS_PCADim1, MS_PCADim2, MS_PCADims, MS_MFADim1No2016, MS_MFADim2No2016, MS_MFADims)
+```
+Climate dimension 1 (MS2_MFADim1No2016) and climate Dimension 1 and 2 (MS2_MFADims) are the most supported metrics of weather or climate, though Dimension 1 only versus Dimension 1 and 2 are equally supported (within 2 AIC units). Choose simplest model structure (MS2_MFADim1No2016).
+
+## Final model
+
+We tested the global model with the winning variables identified above. Here we are asking "what are the effects of areas that typically experience more severe winters given habitat productivity, direct habitat alteration given productivity, and the interaction between areas that typically experience more severe winters and direct habitat alteration?"
+
+```{r, warning=FALSE}
+MS_Global<-glmmTMB(Density~ScaledEvi*ScaledDirAlt + ScaledEvi*ScaledMFADim1No2016 + ScaledDirAlt*ScaledMFADim1No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+summary(MS_Global)
+```
+```{r, warning=FALSE, echo=FALSE}
+require(ggeffects)
+dat <- ggpredict(MS_Global, terms = list(ScaledMFADim1No2016 = seq(0, 1, by = 0.01)))
+ggplot(data = mydata, aes(x = ScaledMFADim1No2016, y = Density,shape=Year, color = EVI)) +
+  geom_ribbon(data = dat, aes(x, ymin = conf.low, ymax = conf.high), alpha=0.2, color="lightgrey", inherit.aes=FALSE)+
+  geom_point(position = position_dodge(0.03), size = 3) + 
+  geom_errorbar(position = position_dodge(0.03), aes(ymin = LCI, ymax = UCI, color = EVI), width=0.05)+
+  geom_line(data=dat, aes(x, predicted), inherit.aes=FALSE)+
+  xlab("Scaled Climate Dimension 1") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  + 
+  labs(color = expression(""*Delta*"EVI"), shape = "Year") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+```
+
+These results suggest that climate is the dominant driver of deer densities. While habitat alteration and productivity may mediate this effect, their magnitude is smaller and effects statistically insignificant. 

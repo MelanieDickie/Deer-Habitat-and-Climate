@@ -1,0 +1,400 @@
+---
+title: "SupplementaryAnalyses"
+author: "Melanie Dickie"
+date: '`r Sys.Date()`'
+output: github_document
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+##Load packages and data:
+require(ggplot2)
+require(viridis)
+require(dplyr)
+require(glmmTMB)
+require(MuMIn)
+require(DHARMa)
+library(sf)
+library(dplyr)
+
+Attributes<-read.csv(here::here("Data", "All_Attributes_October_2023.csv"))
+mydata<-read.csv(here::here("Data", "WTDDensities.csv"))
+```
+
+
+```{r, warning=FALSE, echo=FALSE}
+##Join attributes into camera data:
+mydata$Year[mydata$monitoring_period  == "monitor_2021"] <-2021
+mydata$Year[mydata$monitoring_period  == "monitor_2020"] <-2020
+mydata$Year[mydata$monitoring_period  == "monitor_2019"] <-2019
+mydata$Year[mydata$monitoring_period  == "monitor_2018"] <-2018
+mydata$Year[mydata$monitoring_period  == "monitor_2017"] <-2017
+mydata$Year<-as.factor(mydata$Year)
+mydata$GridYear<-paste(mydata$grid,mydata$Year,sep="")
+
+mydata$Density<-mydata$density_avg
+mydata$LCI<-mydata$density_lci_0.9
+mydata$UCI<-mydata$density_uci_0.9
+
+mydata<-mydata%>%
+  left_join(Attributes, by="GridYear", suffix=c("",".y"))%>%
+  select(-ends_with(".y"))
+
+#rescale all variables from 0 to 1 
+scale_values <- function(x){(x-min(x))/(max(x)-min(x))}
+mydata$ScaledDirAlt<-scale_values(mydata$Dist)
+mydata$ScaledPCADim1<-scale_values(mydata$PCADim1)
+mydata$ScaledPCADim2<-scale_values(mydata$PCADim2)
+mydata$ScaledMFADim1No2016<-scale_values(mydata$MFADim1No2016)
+mydata$ScaledMFADim2No2016<-scale_values(mydata$MFADim2No2016)
+mydata$ScaledEvi<-scale_values(mydata$EVI)
+mydata$ScaledBufAlt<-scale_values(mydata$AnthroDistPerc)
+mydata$ScaledNDep<-scale_values(mydata$n_deployments)
+
+mydata$Year<-as.factor(mydata$Year)
+MS_Global<-glmmTMB(Density~ScaledEvi*ScaledDirAlt + ScaledEvi*ScaledMFADim1No2016 + ScaledDirAlt*ScaledMFADim1No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), weights=ScaledNDep, family = tweedie(), data = mydata)
+```
+
+# Check for spatial autocorrelation in the residuals of the top model
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+##Bring in camera clusters, clean, and extract coordinates of camera clusters/grids
+Grids <- read.csv(here::here("Data", "GridLocations.csv"))
+
+##Remove Richardson grids, which are not a part of these analyses (different program)
+mydata2 <- mydata %>% left_join(Grids, by="grid")
+```
+
+```{r, warning=FALSE}
+mydata2$resid <- resid(MS_Global)
+res <- simulateResiduals(MS_Global)
+res2 = recalculateResiduals(res, group = mydata2$grid)
+testSpatialAutocorrelation(res2, Grids$x_coord, Grids$y_coord)
+```
+
+Moran's I test suggests residuals did not exhibit spatial autocorrelation.
+
+# Appendix A: Seasonal and annual deer densities
+```{r, warning=FALSE}
+seasonal <- read.csv(here::here("Data", "WTDDensities_BySeason.csv"))
+seasonal$Year[seasonal$monitoring_period  == "monitor_2021"] <-2021
+seasonal$Year[seasonal$monitoring_period  == "monitor_2020"] <-2020
+seasonal$Year[seasonal$monitoring_period  == "monitor_2019"] <-2019
+seasonal$Year[seasonal$monitoring_period  == "monitor_2018"] <-2018
+seasonal$Year[seasonal$monitoring_period  == "monitor_2017"] <-2017
+seasonal$Year<-as.factor(seasonal$Year)
+seasonal$GridYear<-paste(seasonal$grid,seasonal$Year,sep="")
+mydataforseasonalcomp<-dplyr::select(mydata, GridYear, common_name, grid, Year, density_avg)
+seasonalcomp<-dplyr::select(seasonal, GridYear, common_name, season, grid, Year, density_avg)
+seasonalcompwide<-tidyr::spread(seasonalcomp, season, density_avg)
+mydataforseasonalcomp2<-merge(mydataforseasonalcomp, seasonalcompwide, by = "GridYear")
+
+ggplot(data = mydataforseasonalcomp2, aes(x = winter, y = summer, color = density_avg)) +
+  geom_point(size = 3) +
+  geom_smooth(method='lm')+
+  xlab(expression(paste("Snow season density (animals / ", km^2, ")")))+  theme_bw()  + 
+  ylab(expression(paste("Snow-free season density (animals / ", km^2, ")")))+  theme_bw()  + 
+  labs(color = "Annual density") +
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) + 
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) + 
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  scale_color_viridis(option="D", direction=1)+
+  theme(strip.text.x = element_text(size = 20), strip.text.y = element_text(size = 20))
+
+cor(mydataforseasonalcomp2$density_avg, mydataforseasonalcomp2$summer, use="complete.obs")
+cor(mydataforseasonalcomp2$density_avg, mydataforseasonalcomp2$winter, use="complete.obs")
+cor(mydataforseasonalcomp2$winter, mydataforseasonalcomp2$summer, use="complete.obs")
+```
+
+# Appendix D: Spatial heterogeneity in landscape attributes within camera clusters
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+##Load data and packages
+GridAltValues<-read.csv(here::here("Data","GridAlterationVales_Aug1_2023.csv"))
+GridProdValues<-read.csv(here::here("Data","Grid2021ProductivityValues_Aug1_2023.csv"))
+EnvCvs<-read.csv(here::here("Data","EnvironmentalCVs_Sept_2023.csv"))
+mydata<-mydata%>%
+  left_join(EnvCvs, by="GridYear", suffix=c("",".y"))%>%
+  select(-ends_with(".y"))
+```
+
+Variation in habitat alteration and habitat productivity within and across clusters:
+Note: I give 2021 as an example for habitat productivity, because habitat productivity is calculated annually
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot(GridAltValues, aes(as.factor(Grid), Disturbance)) +
+  geom_boxplot()+
+  geom_point(alpha=0.15)+
+  theme_bw()+
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  ylab("% Alteration") +
+  xlab("") +
+  coord_flip() 
+```
+```{r, warning=FALSE, echo=FALSE}
+ggplot(GridProdValues, aes(as.factor(Grid), dEVI)) +
+  geom_boxplot() + 
+  geom_point(alpha=0.15)+
+  theme_bw()+
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  ylab(expression(""*Delta*"EVI")) +
+  xlab("") +
+  labs(color = "Range", fill = "Range") +
+  coord_flip()
+```
+
+In general there is relatively similar spread in habitat productivity across clusters, whereas for habitat alteration some clusters are much more heterogeneous than others. 
+
+To evaluate if clusters with more heterogeneous habitat influences deer densities, we calculated the Coefficient of Variation (CV) for delta EVI and habitat alteration in each cluster. This was done annually for habitat productivity. Here is the relationship between deer density and habitat alteration CV and habitat productivity CV within clusters: 
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = alt_cv, y = Density, shape=as.factor(Year), colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = alt_cv   , y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("% Alteration CV") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  #labs(color = "Disturbance", shape = "Year") +
+  theme_bw()  +
+  labs(colour = "Year", shape = "Year") +
+  theme(axis.text.x = element_text(size=13), axis.title = element_text(size=13)) +
+  theme(axis.text.y = element_text(size=13), axis.title = element_text(size=13)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=13), axis.title = element_text(size=13))+
+  theme(legend.text = element_text(size=13))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = evi_cv   , y = Density, shape=as.factor(Year), colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = evi_cv   , y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab(expression(""*Delta*"EVI CV")) +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  labs(colour = "Year", shape = "Year") +
+  theme_bw()  +
+  theme(axis.text.x = element_text(size=13), axis.title = element_text(size=13)) +
+  theme(axis.text.y = element_text(size=13), axis.title = element_text(size=13)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=13), axis.title = element_text(size=13))+
+  theme(legend.text = element_text(size=13))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+
+We tested whether mean values or CV of the values are more supported in an AIC framework as explanatory variables to be carried forward in the modeling approach: 
+
+```{r, warning=FALSE}
+scale_values <- function(x){(x-min(x))/(max(x)-min(x))}
+mydata$ScaledDirAlt<-scale_values(mydata$Dist)
+mydata$ScaledirAltCV<-scale_values(mydata$alt_cv)
+mydata$ScaledEvi<-scale_values(mydata$EVI)
+mydata$ScaledEviCV<-scale_values(mydata$evi_cv)
+mydata$ScaledNDep<-scale_values(mydata$n_deployments)
+mydata$Year<-as.factor(mydata$Year)
+
+##Don't converge with the weight, so removed
+MS_DirAlt<-glmmTMB(Density~ScaledDirAlt + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+MS_DirAltCV<-glmmTMB(Density~ScaledirAltCV + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+MS_DirAltCVInt<-glmmTMB(Density~ScaledDirAlt*ScaledirAltCV + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+AICc(MS_DirAlt, MS_DirAltCV, MS_DirAltCVInt)
+```
+
+Mean habitat alteration is more supported than variation in habitat alteration, and the interaction model.
+
+```{r, warning=FALSE}
+MS_EVI<-glmmTMB(Density~ScaledEvi + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+MS_EVICV<-glmmTMB(Density~ScaledEviCV + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+MS_EVICVInt<-glmmTMB(Density~ScaledEvi*ScaledEviCV + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = mydata)
+AICc(MS_EVI, MS_EVICV, MS_EVICVInt)
+```
+Mean delta EVI is more supported than variation in delta EVI, and the interaction model
+Including the CV rather than mean is not supported by the data.
+
+
+# Appendix E: Evaluating lags in annual weather and 5-year climate metrics
+
+There is the potential that weather or climate have a lag effect on deer densities, where the year prior may influence densities. To test this, we re-ran the MFA and the PCA to include a one-year lag in the climate and weather data, and included the lag variables in the model competition process:
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = PCA1wLag1Y, y = Density, colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = PCA1wLag1Y, y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("PCA Dimension 1 One-Year Lag") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  #labs(color = "Disturbance", shape = "Year") +
+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = PCA1wLagNo, y = Density, colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = PCA1wLagNo, y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("PCA Dimension 1 No Lag") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  #labs(color = "Disturbance", shape = "Year") +
+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = MFAwLag, y = Density, colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = MFAwLag, y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("MFA Dimension 1 One-Year Lag") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  #labs(color = "Disturbance", shape = "Year") +
+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = mydata, aes(x = MFADim1No2016, y = Density, colour=as.factor(Year)), size = 3, position = position_dodge(width = 0.2)) +
+  geom_errorbar(data = mydata, aes(x = MFADim1No2016, y = Density,  colour=as.factor(Year), ymin = LCI, ymax = UCI), width = 0.2, position = "dodge")+
+  xlab("MFA Dimension 1 No Lag") +
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  #labs(color = "Disturbance", shape = "Year") +
+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  theme(legend.text = element_text(size=12))+
+  theme(legend.position = "top")+
+  scale_color_manual(values=c("grey10","gray30","gray50", "gray70", "gray90"), name = "Year")
+```
+```{r, warning=FALSE}
+mydata$SPCA1wLagNo<-scale_values(mydata$PCA1wLagNo)
+mydata$SPCA2wLagNo<-scale_values(mydata$PCA2wLagNo)
+mydata$SPCA1wLag1Y<-scale_values(mydata$PCA1wLag1Y)
+mydata$SPCA2wLag1Y<-scale_values(mydata$PCA2wLag1Y)
+mydata$SMFADim1No2016<-scale_values(mydata$MFADim1No2016)
+mydata$SMFADim2No2016<-scale_values(mydata$MFADim2No2016)
+mydata$SMFAD1wLag<-scale_values(mydata$MFAD1wLag)
+mydata$SMFAD2wLag<-scale_values(mydata$MFAD2wLag)
+
+MS_PCA1wLag1Y<-glmmTMB(Density~SPCA1wLag1Y + (1|Year) + (1|grid) + ar1(Year+0 | grid),
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_PCA2wLag1Y<-glmmTMB(Density~SPCA2wLag1Y + (1|Year) + (1|grid) + ar1(Year+0 | grid),
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_PCADimswLag1Y<-glmmTMB(Density~SPCA1wLag1Y + SPCA2wLag1Y + (1|Year) + (1|grid) + ar1(Year+0 | grid),
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+
+MS_MFAD1Lag<-glmmTMB(Density~SMFAD1wLag + (1|Year) + (1|grid) + ar1(Year+0 | grid), 
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_MFAD2Lag<-glmmTMB(Density~SMFAD2wLag + (1|Year) + (1|grid) + ar1(Year+0 | grid), 
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+MS_MFADimsLag<-glmmTMB(Density~SMFAD1wLag+SMFAD2wLag + (1|Year) + (1|grid) + ar1(Year+0 | grid), 
+                       weights=ScaledNDep, family = tweedie(), data = mydata)
+
+AICc(MS_PCA1wLag1Y, MS_PCA2wLag1Y, MS_PCADimswLag1Y, MS_MFAD1Lag, MS_MFAD2Lag, MS_MFADimsLag)
+```
+
+The lag doesn't have a lower AIC than the non-lag counterpart. Including 2016 data in the underlying PCA does improve it's performance relative to the PCA that's built only on data from 2017 through 2021. Including 2016 data in the MFA doesn't improve it's explanatory power relative to when only 2017 through 2021 data are included. 
+
+
+# Appendix F: Analyses reflecting individual cameras as the sample unit
+
+```{r, warning=FALSE, echo=FALSE}
+camdata <- read.csv(here::here("Data", "WTDDensities_ByCamera.csv"))
+camdata$Year<-as.factor(camdata$Year)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = camdata, aes(x = Dist, y = full_density_km2, colour=as.factor(Year)), position = position_dodge(width = 0.2)) +
+  labs(colour = "") +
+  theme_bw()  +
+  xlab("% Alteration") +
+  #scale_x_discrete(guide = guide_axis(angle = 90))+
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  theme(axis.text.x = element_text(size=5), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=5), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  scale_colour_viridis(discrete=TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = camdata, aes(x = MFADim1, y = full_density_km2, colour=as.factor(Year)), position = position_dodge(width = 0.2)) +
+  labs(colour = "") +
+  theme_bw()  +
+  xlab("Climate Dimension 1") +
+  #scale_x_discrete(guide = guide_axis(angle = 90))+
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  scale_colour_viridis(discrete=TRUE)
+```
+```{r, warning=FALSE, echo=FALSE}
+ggplot() +
+  geom_point(data = camdata, aes(x = EVI, y = full_density_km2, colour=as.factor(Year)), position = position_dodge(width = 0.2)) +
+  labs(colour = "") +
+  theme_bw()  +
+  xlab(expression(""*Delta*"EVI")) +
+  #scale_x_discrete(guide = guide_axis(angle = 90))+
+  ylab(expression(paste("Density (animals / ", km^2, ")")))+  theme_bw()  +
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))+
+  scale_colour_viridis(discrete=TRUE)
+```
+
+We re-ran the model competition, and the top global model from the main analyses, then plot the model for only significant effects:
+
+```{r, warning=FALSE}
+MS2_DirAlt<-glmmTMB(full_density_km2~ScaledDirAlt + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_BufAlt<-glmmTMB(full_density_km2~ScaledBufAlt + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+AICc(MS2_DirAlt, MS2_BufAlt)
+# Direct disturbance is most supported
+
+MS2_PCADim1<-glmmTMB(full_density_km2~ScaledPCADim1 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_PCADim2<-glmmTMB(full_density_km2~ScaledPCADim2 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_PCADims<-glmmTMB(full_density_km2~ScaledPCADim1+ScaledPCADim2 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_MFADim1No2016<-glmmTMB(full_density_km2~ScaledMFADim1No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_MFADim2No2016<-glmmTMB(full_density_km2~ScaledMFADim2No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+MS2_MFADims<-glmmTMB(full_density_km2~ScaledMFADim1No2016+ScaledMFADim2No2016 + (1|Year) + (1|grid) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+AICc(MS2_PCADim1, MS2_PCADim2, MS2_PCADims, MS2_MFADim1No2016, MS2_MFADim2No2016, MS2_MFADims)
+# MS2_MFADim1No2016 and MS2_MFADims have lowest AICc, but within 2 AIC units. Choose simplest model structure (MS2_MFADim1No2016)
+```
+
+
+```{r, warning=FALSE, echo=FALSE}
+camdata$Year<-as.factor(camdata$Year)
+IndCam_Global<-glmmTMB(full_density_km2~ScaledEvi*ScaledDirAlt + ScaledEvi*ScaledMFADim1No2016 + ScaledDirAlt*ScaledMFADim1No2016 + (1|grid) + (1|Year) + ar1(Year+0 | grid), family = tweedie(), data = camdata)
+summary(IndCam_Global)
+```
+```{r, warning=FALSE, echo=FALSE}
+sjPlot::plot_model(IndCam_Global, type = "pred", terms = c("ScaledMFADim1No2016"))+
+  theme_bw()  +
+  geom_line(color = "black", size=1)+
+  labs(title="", x ="Climate Dimension 1", y = expression(paste("Density (animals /", km^2, ")")))+
+  theme(axis.text.x = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(axis.text.y = element_text(size=12), axis.title = element_text(size=12)) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major=element_blank()) +
+  theme(legend.title = element_text(size=12), axis.title = element_text(size=12))
+```
+
+Again, climate dimension 1 (winter severity), appears to be the dominant driver of deer densities. 
